@@ -1,38 +1,19 @@
 pragma solidity 0.6.12;
 
-/**
-Bird On-chain Oracle to confirm rating with 50% consensus before update using the off-chain API https://www.bird.money/docs
-*/
-
 // © 2020 Bird Money
 // SPDX-License-Identifier: MIT
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+
 import "@openzeppelin/contracts/math/SafeMath.sol";
+import "./Unlockable.sol";
 
-contract BirdOracle is Ownable {
+/// @title Oracle service to find rating of any ethereum address
+/// @author Bird Money
+/// @notice Bird On-chain Oracle to confirm rating with consensus before update using the off-chain API. for details https://www.bird.money/docs
+/// @dev reward to node providers is a list. rewards = [reward1, reward2, reward3, ...]
+contract BirdOracle is Unlockable {
     using SafeMath for uint256;
-
-    BirdRequest[] public onChainRequests; //keep track of list of on-chain
-
-    uint256 public minConsensus = 2; //minimum votes on an answer before confirmation
-    uint256 public birdNest = 0; // birds in nest count i.e total trusted providers
-    uint256 public trackId = 0; //current request id
-
-    address[] public providers; //offchain oracle nodes
-    mapping(address => uint256) statusOf; //offchain data provider address => TRUSTED or NOT
-
-    //status of providers with respect to all requests
-    uint8 constant NOT_TRUSTED = 0;
-    uint8 constant TRUSTED = 1;
-    uint8 constant WAS_TRUSTED = 2;
-
-    //status of with respect to individual request
-    uint8 constant NOT_VOTED = 0;
-    uint8 constant VOTED = 2;
-
     /**
-     * Bird Standard API Request
+     * @dev Bird Standard API Request
      * id: "1"
      * ethAddress: address(0xcF01971DB0CAB2CBeE4A8C21BB7638aC1FA1c38c)
      * key: "bird_rating"
@@ -52,12 +33,50 @@ contract BirdOracle is Ownable {
         mapping(address => uint256) statusOf; //offchain data provider address => VOTED or NOT
     }
 
+    /// @notice keep track of list of on-chain requestes
+    BirdRequest[] public onChainRequests;
+
+    /// @notice minimum votes on an answer before confirmation
+    uint256 public minConsensus = 2;
+
+    /// @notice birds in nest count i.e total trusted providers
+    uint256 public totalTrustedProviders = 0;
+
+    /// @notice current request id
+    uint256 public currRequestId = 0;
+
+    // all offchain oracle nodes i.e trusted and may be some are not trusted
+    address[] private providers;
+
+    /// @notice offchain data provider address => TRUSTED or NOT
+    mapping(address => uint256) public statusOf;
+
+    // offchain data provider address => (onPortion => no of answers) casted
+    mapping(address => mapping(uint256 => uint256)) private answersGivenBy;
+
+    /// @notice offchain data provider answers, onPortion => total no of answers
+    mapping(uint256 => uint256) public totalAnswersGiven;
+
+    // status of providers with respect to all requests
+    uint8 private constant NOT_TRUSTED = 0;
+    uint8 private constant TRUSTED = 1;
+    uint8 private constant WAS_TRUSTED = 2;
+
+    // status of with respect to individual request
+    uint8 private constant NOT_VOTED = 0;
+    uint8 private constant VOTED = 2;
+
     mapping(address => uint256) private ratingOf; //saved ratings of eth addresses after consensus
 
-    // Bird Standard API Request Off-Chain-Request from outside the blockchain
+    uint256 private onPortion = 1; // portion means portions of answers or group of answers, portion id from 0,1,2,.. to n
+
+    /// @notice the token in which the reward is given
+    IERC20 public rewardToken;
+
+    /// @notice  Bird Standard API Request Off-Chain-Request from outside the blockchain
     event OffChainRequest(uint256 id, address ethAddress, string key);
 
-    // To call when there is consensus on final result
+    /// @notice  To call when there is consensus on final result
     event UpdatedRequest(
         uint256 id,
         address ethAddress,
@@ -65,36 +84,57 @@ contract BirdOracle is Ownable {
         uint256 value
     );
 
+    /// @notice when an off-chain data provider is added
     event ProviderAdded(address provider);
+
+    /// @notice when an off-chain data provider is removed
     event ProviderRemoved(address provider);
 
-    constructor(address _birdTokenAddr) public {
-        birdToken = IERC20(_birdTokenAddr);
+    /// @notice When min consensus value changes
+    /// @param minConsensus minimum number of votes required to accept an answer from offchain data providers
+    event MinConsensusChanged(uint256 minConsensus);
+
+    /// @notice When a node provider withdraw his reward
+    /// @param _provider the node provider i.e off-chain data provider
+    /// @param _accReward the amount of reward collected by node provider
+    event RewardWithdrawn(address _provider, uint256 _accReward);
+
+    constructor(address _rewardTokenAddr) public {
+        rewardToken = IERC20(_rewardTokenAddr);
     }
 
-    function addProvider(address _provider) public onlyOwner {
+    /// @notice add any address as off-chain data provider to trusted providers list
+    /// @param _provider the address which is added
+    function addProvider(address _provider) external onlyOwner {
         require(statusOf[_provider] != TRUSTED, "Provider is already added.");
 
         if (statusOf[_provider] == NOT_TRUSTED) providers.push(_provider);
         statusOf[_provider] = TRUSTED;
-        ++birdNest;
+        totalTrustedProviders = totalTrustedProviders.add(1);
 
         emit ProviderAdded(_provider);
     }
 
-    function removeProvider(address _provider) public onlyOwner {
+    /// @notice remove any address as off-chain data provider from trusted providers list
+    /// @param _provider the address which is removed
+    function removeProvider(address _provider) external onlyOwner {
         require(statusOf[_provider] == TRUSTED, "Provider is already removed.");
 
         statusOf[_provider] = WAS_TRUSTED;
-        --birdNest;
+        totalTrustedProviders = totalTrustedProviders.sub(1);
 
         emit ProviderRemoved(_provider);
     }
 
-    function newChainRequest(address _ethAddress, string memory _key) public {
+    /// @notice Bird Standard API Request Off-Chain-Request from outside the blockchain
+    /// @param _ethAddress the address which rating is required to read from offchain
+    /// @param _key its tells offchain data providers from any specific attributes
+    function newChainRequest(address _ethAddress, string memory _key) external {
+        require(bytes(_key).length > 0, "String with 0 length no allowed");
+
         onChainRequests.push(
             BirdRequest({
-                id: trackId,
+                id: currRequestId,
                 ethAddress: _ethAddress,
                 key: _key,
                 value: 0, // if resolved is true then read value
@@ -103,32 +143,42 @@ contract BirdOracle is Ownable {
         );
 
         //Off-Chain event trigger
-        emit OffChainRequest(trackId, _ethAddress, _key);
+        emit OffChainRequest(currRequestId, _ethAddress, _key);
 
         //update total number of requests
-        trackId++;
+        currRequestId = currRequestId.add(1);
     }
 
-    //called by the Off-Chain oracle to record its answer
-    function updatedChainRequest(uint256 _id, uint256 _response) public {
+    /// @notice called by the Off-Chain oracle to record its answer
+    /// @param _id the request id
+    /// @param _response the answer to query of this request id
+    function updatedChainRequest(uint256 _id, uint256 _response) external {
         BirdRequest storage req = onChainRequests[_id];
+        address sender = msg.sender;
 
         require(
-            req.resolved == false,
+            !req.resolved,
             "Error: Consensus is complete so you can not vote."
         );
+
         require(
-            statusOf[msg.sender] == TRUSTED,
+            statusOf[sender] == TRUSTED,
             "Error: You are not allowed to vote."
         );
 
         require(
-            req.statusOf[msg.sender] == NOT_VOTED,
+            req.statusOf[sender] == NOT_VOTED,
             "Error: You have already voted."
         );
 
-        req.statusOf[msg.sender] = VOTED;
-        uint256 thisAnswerVotes = ++req.votesOf[_response];
+        answersGivenBy[sender][onPortion] = answersGivenBy[sender][onPortion]
+        .add(1);
+
+        totalAnswersGiven[onPortion] = totalAnswersGiven[onPortion].add(1);
+
+        req.statusOf[sender] = VOTED;
+        req.votesOf[_response] = req.votesOf[_response].add(1);
+        uint256 thisAnswerVotes = req.votesOf[_response];
 
         if (thisAnswerVotes >= minConsensus) {
             req.resolved = true;
@@ -138,50 +188,174 @@ contract BirdOracle is Ownable {
         }
     }
 
+    /// @notice get rating of any address
+    /// @param _ethAddress the address which rating is required to read from offchain
+    /// @return the required rating of any ethAddress
     function getRatingByAddress(address _ethAddress)
-        public
+        external
         view
         returns (uint256)
     {
         return ratingOf[_ethAddress];
     }
 
-    function getRating() public view returns (uint256) {
+    /// @notice get rating of caller address
+    /// @return the required rating of caller
+    function getRatingOfCaller() external view returns (uint256) {
         return ratingOf[msg.sender];
     }
 
-    //get trusted providers
-    function getProviders() public view returns (address[] memory) {
-        address[] memory trustedProviders = new address[](birdNest);
+    /// @notice get rating of trusted providers to show on ui
+    /// @return the trusted providers list
+    function getProviders() external view returns (address[] memory) {
+        address[] memory trustedProviders = new address[](
+            totalTrustedProviders
+        );
         uint256 t_i = 0;
-        for (uint256 i = 0; i < providers.length; i++) {
+        uint256 totalProviders = providers.length;
+        for (uint256 i = 0; i < totalProviders; i = i.add(1)) {
             if (statusOf[providers[i]] == TRUSTED) {
                 trustedProviders[t_i] = providers[i];
-                t_i++;
+                t_i = t_i.add(1);
             }
         }
         return trustedProviders;
     }
 
-    IERC20 public birdToken;
-
-    function rewardProviders() public onlyOwner {
-        //give 50% BIRD in this contract to owner and 50% to providers
-        uint256 rewardToOwnerPercentage = 50; // 50% reward to owner and rest money to providers
-
-        uint256 balance = birdToken.balanceOf(address(this));
-        uint256 rewardToOwner = balance.mul(rewardToOwnerPercentage).div(100);
-        uint256 rewardToProviders = balance - rewardToOwner;
-        uint256 rewardToEachProvider = rewardToProviders.div(birdNest);
-
-        birdToken.transfer(owner(), rewardToOwner);
-
-        for (uint256 i = 0; i < providers.length; i++)
-            if (statusOf[providers[i]] == TRUSTED)
-                birdToken.transfer(providers[i], rewardToEachProvider);
+    /// @notice owner can set reward token according to the needs
+    /// @param _minConsensus minimum number of votes required to accept an answer from offchain data providers
+    function setMinConsensus(uint256 _minConsensus) external onlyOwner {
+        minConsensus = _minConsensus;
+        emit MinConsensusChanged(_minConsensus);
     }
 
-    function setMinConsensus(uint256 _minConsensus) public onlyOwner {
-        minConsensus = _minConsensus;
+    /// @notice owner can reward providers with USDT or any ERC20 token
+    /// @param _totalSentReward the amount of tokens to be equally distributed to all trusted providers
+    function rewardProviders(uint256 _totalSentReward) external onlyOwner {
+        require(_totalSentReward != 0, "Can not give ZERO reward.");
+        rewards[onPortion] = _totalSentReward;
+        onPortion = onPortion.add(1);
+        rewardToken.transferFrom(owner(), address(this), _totalSentReward);
+    }
+
+    mapping(address => uint256) private lastRewardPortionOf;
+
+    // stores the list of rewards given by owner
+    // answers are divided in portions, (uint256 => uint256) means (answersPortionId => ownerAddedRewardForThisPortion)
+    mapping(uint256 => uint256) private rewards;
+
+    /// @notice any node provider can call this method to withdraw his reward
+    function withdrawReward() public {
+        withdrawReward(onPortion);
+    }
+
+    /// @notice any node provider can call this method to withdraw his reward
+    /// @param _portions amount of reward blocks from which you want to get your reward
+    function withdrawReward(uint256 _portions) public {
+        address sender = msg.sender;
+        require(statusOf[sender] == TRUSTED, "You can not withdraw reward.");
+
+        uint256 lastRewardedPortion = lastRewardPortionOf[sender];
+        uint256 toRewardPortion = lastRewardedPortion.add(_portions);
+        if (toRewardPortion > onPortion) toRewardPortion = onPortion;
+        lastRewardPortionOf[sender] = toRewardPortion;
+        uint256 accReward = getAccReward(lastRewardedPortion, toRewardPortion);
+        rewardToken.transfer(sender, accReward);
+        emit RewardWithdrawn(sender, accReward);
+    }
+
+    /// @notice any node provider can call this method to see his reward
+    /// @return reward of a node provider
+    function seeReward(address _sender) public view returns (uint256) {
+        return seeReward(_sender, onPortion);
+    }
+
+    /// @notice any node provider can call this method to see his reward
+    /// @param _portions amount of reward portions from which you want to see your reward
+    /// @return reward of a provider on given number of answers portions
+    function seeReward(address _sender, uint256 _portions)
+        public
+        view
+        returns (uint256)
+    {
+        uint256 lastRewardedPortion = lastRewardPortionOf[_sender];
+        uint256 toRewardPortion = lastRewardedPortion.add(_portions);
+        if (toRewardPortion > onPortion) toRewardPortion = onPortion;
+        return getAccReward(lastRewardedPortion, toRewardPortion);
+    }
+
+    function getAccReward(uint256 lastRewardedPortion, uint256 toRewardPortion)
+        private
+        view
+        returns (uint256)
+    {
+        address sender = msg.sender;
+        uint256 accReward = 0;
+        for (
+            uint256 onThisPortion = lastRewardedPortion;
+            onThisPortion < toRewardPortion;
+            onThisPortion = onThisPortion.add(1)
+        ) {
+            if (totalAnswersGiven[onThisPortion] > 0)
+                accReward = accReward.add(
+                    rewards[onThisPortion]
+                    .mul(answersGivenBy[sender][onThisPortion])
+                    .div(totalAnswersGiven[onThisPortion])
+                );
+        }
+
+        return accReward;
+    }
+
+    /// @notice owner calls this function to see how much reward should he give to node providers
+    /// @return total no of answers given in this portion of answers
+    function getTotalAnswersGivenAfterReward() public view returns (uint256) {
+        return totalAnswersGiven[onPortion];
+    }
+
+    /// @notice owner calls this function to see how much reward he gave to node providers
+    /// @return list of rewards given by owner
+    function rewardsGivenTillNow() public view returns (uint256[] memory) {
+        uint256[] memory rewardsGiven = new uint256[](onPortion);
+        for (uint256 i = 1; rewards[i] != 0; i = i.add(1)) {
+            rewardsGiven[i] = rewards[i];
+        }
+        return rewardsGiven;
+    }
+
+    /// @notice get total answers given by some provider
+    /// @param _provider the off-chain data provider
+    /// @return total answers given by some provider
+    function totalAnswersGivenByProvider(address _provider)
+        public
+        view
+        returns (uint256)
+    {
+        uint256 totalAnswersGivenByThisProvider = 0;
+        for (
+            uint256 onThisPortion = 0;
+            onThisPortion < onPortion;
+            onThisPortion = onThisPortion.add(1)
+        )
+            totalAnswersGivenByThisProvider = totalAnswersGivenByThisProvider
+            .add(answersGivenBy[_provider][onThisPortion]);
+
+        return totalAnswersGivenByThisProvider;
+    }
+
+    /// @notice get total answers given by all providers
+    /// @return total answers given by all providers
+    function totalAnswersGivenByAllProviders() public view returns (uint256) {
+        uint256 theTotalAnswersGiven = 0;
+        for (
+            uint256 onThisPortion = 0;
+            onThisPortion < onPortion;
+            onThisPortion = onThisPortion.add(1)
+        )
+            theTotalAnswersGiven = theTotalAnswersGiven.add(
+                totalAnswersGiven[onThisPortion]
+            );
+
+        return theTotalAnswersGiven;
     }
 }

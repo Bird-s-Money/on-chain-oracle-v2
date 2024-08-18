@@ -1,67 +1,87 @@
-const HDWalletProvider = require('@truffle/hdwallet-provider');
-const infuraKey = '8165c77d80d441ab86e573b151f62b8d';
-
-const fs = require('fs');
-const mnemonic = fs.readFileSync('.secret').toString().trim();
+var HDWalletProvider = require("@truffle/hdwallet-provider");
+require("dotenv").config();
+const MNEMONIC = process.env.MNEMONIC;
+const token = process.env.INFURA_TOKEN;
+const etherscanKey = process.env.BSCSCAN_KEY;
 
 module.exports = {
   networks: {
+    develop: {
+      host: "127.0.0.1",
+      port: 8545,
+      network_id: "*",
+      gas: 6721975,
+    },
     development: {
-      host: '127.0.0.1',
+      host: "127.0.0.1",
       port: 7545,
-      network_id: '*', // Match any network id
+      network_id: "*",
+      gas: 6721975,
     },
+    bscTestnet: {
+      provider: () => {
+        return new HDWalletProvider(
+          MNEMONIC,
+          "https://data-seed-prebsc-1-s1.binance.org:8545"
+        );
+      },
+      network_id: "97",
+      skipDryRun: false,
+    },
+
+    bscMainnet: {
+      provider: () => {
+        return new HDWalletProvider(
+          MNEMONIC,
+          "https://bsc-dataseed.binance.org"
+        );
+      },
+      network_id: "56",
+      skipDryRun: false,
+    },
+
     mainnet: {
-      provider: () =>
-        new HDWalletProvider(
-          mnemonic,
-          `https://mainnet.infura.io/v3/${infuraKey}`
-        ),
-      network_id: 1, // Mainnet's id
+      provider: () => {
+        return new HDWalletProvider(
+          MNEMONIC,
+          "https://mainnet.infura.io/v3/" + token
+        );
+      },
+      network_id: "1",
     },
-
-    rinkeby: {
-      provider: () =>
-        new HDWalletProvider(
-          mnemonic,
-          `https://rinkeby.infura.io/v3/${infuraKey}`
-        ),
-      network_id: 4, // Ropsten's id
-      skipDryRun: true,
-    },
-
     ropsten: {
-      provider: () =>
-        new HDWalletProvider(
-          mnemonic,
-          `https://ropsten.infura.io/v3/${infuraKey}`
-        ),
-      network_id: 3, // Ropsten's id
-      skipDryRun: true,
+      provider: () => {
+        return new HDWalletProvider(
+          MNEMONIC,
+          "https://ropsten.infura.io/v3/" + token
+        );
+      },
+      network_id: "3",
     },
-
     kovan: {
-      provider: () =>
-        new HDWalletProvider(
-          mnemonic,
-          `https://kovan.infura.io/v3/${infuraKey}`
-        ),
-      network_id: 42,
+      provider: () => {
+        return new HDWalletProvider(
+          MNEMONIC,
+          "https://kovan.infura.io/v3/" + token
+        );
+      },
+      network_id: "42",
       skipDryRun: true,
     },
+  },
+  plugins: ["truffle-plugin-verify"],
+  api_keys: {
+    etherscan: etherscanKey,
   },
   compilers: {
     solc: {
-      version: '0.6.12',
-      optimizer: {
-        enabled: true,
-        runs: 200,
+      version: "0.6.12",
+      settings: {
+        optimizer: {
+          enabled: true,
+          runs: 200,
+        },
       },
-      evmVersion: 'petersburg',
     },
-  },
-  plugins: ['truffle-plugin-verify'],
-  api_keys: {
-    etherscan: '8R621NFWB6T6RMADTAZT8UGBBC5IATEUEM',
   },
 };
